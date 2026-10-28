@@ -1,0 +1,30 @@
+# review-pane
+
+A code review pane that sits beside the chat, modelled on the Codex app's review pane.
+
+- `/review-pane` opens it (it opens by itself in the desktop app). `/review-pane add <path>` adds a repository it did not find.
+- Repositories: the session's own, any git repo one or two folders below it, and any repo Claude edits a file in. With more than one, a picker shows each with its count of changed files.
+- Scopes, per selected repo: **Unstaged** (with untracked files), **Staged**, **Branch** (against a base branch's merge base, remembered per repo), **Commit** (one of the last 20). **Last turn** spans every repo and shows only what Claude's latest turn changed, from a `git stash create` snapshot of each repo taken as the turn starts.
+- Diffs are drawn as rows with old/new line numbers and light syntax highlighting. Files start unfolded; click a name to fold it.
+- Hover a line and click **+** to comment (on the terminal the **+** is always shown). Pending comments go to Claude with your next message as context; **Send to Claude** fills the prompt with a ready request to address them.
+- The diff refreshes after every Edit, Write and Bash call and at the end of each turn.
+
+Needs `git` on the PATH. Commenting needs a surface with text input (not mobile).
+
+## Install
+
+At the prompt of a Claude Code terminal session:
+
+```
+/plugin install review-pane --marketplace loucimj/review-pane
+```
+
+Answer `y` to add the marketplace, then pick a scope (user scope loads it in every session).
+
+From a shell:
+
+```bash
+claude plugin install review-pane --marketplace loucimj/review-pane
+```
+
+In the desktop app: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `loucimj/review-pane`, then **Add plugin**.

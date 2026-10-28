@@ -1,0 +1,5 @@
+{
+  "name": "review-pane",
+  "owner": { "name": "loucimj" },
+  "plugins": [{ "name": "review-pane", "source": "./" }]
+}
