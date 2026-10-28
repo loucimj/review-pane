@@ -121,3 +121,48 @@ test('a file folds and unfolds', async ($, on) => {
   await ui.press({ key: 'f:api/src/a.ts' })
   await ui.unmount()
 })
+
+test('the band toggles the pane and steps aside when nothing changed', async ($, on) => {
+  fakeHost(on)
+  const open = new Set<string>()
+  on('ui.open', (_, e) => {
+    open.add(e.id)
+
+    return { value: { isPlaced: true } }
+  })
+  on('ui.close', (_, e) => {
+    open.delete(e.id)
+
+    return { value: undefined }
+  })
+  on('ui.panes', () => ({
+    value: [...open].map(id => ({ id, title: id, isShown: true, isFocused: false, isPlaced: true })),
+  }))
+
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await pane.press({ key: 'refresh' })
+  await pane.unmount()
+
+  const BAND = {
+    plugin: 'review-pane',
+    component: 'AbovePrompt',
+    requestId: 'band',
+    props: {
+      hasSurvey: false,
+      isWorking: false,
+      maxRows: 10,
+      bodyColumns: 80,
+      scroll: { offset: 0, bodyRows: 10 },
+      view: {},
+    },
+  } as const
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const band = await $.ui.mount({ ...BAND, surface })
+    expect((await band.find({ key: 'review-toggle' }))?.text).toContain('1 file')
+    await band.press({ key: 'review-toggle' })
+    expect(open.has('review-pane')).toBe(true)
+    await band.press({ key: 'review-toggle' })
+    expect(open.has('review-pane')).toBe(false)
+    await band.unmount()
+  }
+})

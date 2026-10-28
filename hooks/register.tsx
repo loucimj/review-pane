@@ -347,6 +347,38 @@ export const register: Register = on => {
     return ran
   }).catch(($, e, next) => next(e))
 
+  // A one-click toggle above the prompt, the nearest a mod gets to a title
+  // bar button; it steps aside when nothing is changed or pending.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey) return next(e)
+    const snap = await read($, snapshot)
+    const changed = snap.repos.reduce((n, r) => n + r.changed, 0)
+    const pending = (await read($, comments)).filter(c => !c.isSent).length
+    if (changed === 0 && pending === 0) return next(e)
+
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const toggle = async () => {
+      const isOpen = (await $.ui.panes()).some(p => p.id === PANE)
+      if (isOpen) {
+        await $.ui.close({ id: PANE })
+      } else {
+        await $.ui.open({ id: PANE, title: TITLE })
+      }
+    }
+
+    return (
+      <Box>
+        <Button key="review-toggle" plain onPress={toggle}>
+          Review
+          <Text dimColor>
+            {changed ? ` · ${changed} file${changed === 1 ? '' : 's'}` : ''}
+            {pending ? ` · ${pending} comment${pending === 1 ? '' : 's'}` : ''}
+          </Text>
+        </Button>
+      </Box>
+    )
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const table = $.ui.resolve(e)
     const { Box, Text, Button } = table

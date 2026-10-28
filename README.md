@@ -2,7 +2,7 @@
 
 A code review pane that sits beside the chat, modelled on the Codex app's review pane.
 
-- `/review-pane` opens it (it opens by itself in the desktop app). `/review-pane add <path>` adds a repository it did not find.
+- `/review-pane` opens it (it opens by itself in the desktop app), and a **Review** button above the prompt toggles it, with counts of changed files and pending comments (hidden when there are none). `/review-pane add <path>` adds a repository it did not find.
 - Repositories: the session's own, any git repo one or two folders below it, and any repo Claude edits a file in. With more than one, a picker shows each with its count of changed files.
 - Scopes, per selected repo: **Unstaged** (with untracked files), **Staged**, **Branch** (against a base branch's merge base, remembered per repo), **Commit** (one of the last 20). **Last turn** spans every repo and shows only what Claude's latest turn changed, from a `git stash create` snapshot of each repo taken as the turn starts.
 - Diffs are drawn as rows with old/new line numbers and light syntax highlighting. Files start unfolded; click a name to fold it.
