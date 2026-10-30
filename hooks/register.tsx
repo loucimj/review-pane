@@ -19,6 +19,9 @@ import {
   lineAnchor,
   clip,
   isHeavy,
+  MAX_DRAWN_CHARS,
+  MAX_HUNK_LINES,
+  slim,
   parseDiff,
   repoName,
   tokenize,
@@ -27,9 +30,7 @@ import {
 
 const PANE = 'review-pane'
 const TITLE = 'Review'
-const MAX_HUNK_LINES = 300
 const MAX_UNTRACKED = 30
-const MAX_DRAWN_CHARS = 400
 
 const SCOPES: { id: Scope; label: string }[] = [
   { id: 'unstaged', label: 'Unstaged' },
@@ -81,7 +82,7 @@ const isRefreshing = atom({ plugin: 'review-pane', key: 'isRefreshing' } as cons
 // Change a tag when its value's fields change: it declines what an earlier
 // version stored, which outlives a reload.
 const snapshot = atom({ plugin: 'review-pane', key: 'snapshot' } as const, EMPTY, {
-  shape: 'snapshot-3',
+  shape: 'snapshot-4',
 })
 const comments = atom({ plugin: 'review-pane', key: 'comments' } as const, [], {
   shape: 'comments-2',
@@ -215,7 +216,7 @@ async function loadGroup($: $, root: string, current: Scope, branches: string[])
     files.push(...(await untracked($, root, paths)))
   }
 
-  return { root, name, files }
+  return { root, name, files: files.map(slim) }
 }
 
 async function load($: $): Promise<Snapshot> {
@@ -643,7 +644,7 @@ export const register: Register = on => {
       const foldKey = `${group.root}:${file.path}`
       // `collapsed` holds the files flipped from their default: heavy ones
       // start folded, the rest open.
-      const isLarge = isHeavy(file)
+      const isLarge = file.isLarge ?? isHeavy(file)
       const isOpen = isLarge ? folded.has(foldKey) : !folded.has(foldKey)
       const toggle = () =>
         update($, collapsed, list =>
@@ -671,6 +672,7 @@ export const register: Register = on => {
             !file.isBinary &&
             file.hunks.map((hunk, i) => {
               const shown = hunk.lines.slice(0, MAX_HUNK_LINES)
+              const more = (hunk.more ?? 0) + hunk.lines.length - shown.length
 
               return (
                 <Box flexDirection="column">
@@ -682,8 +684,8 @@ export const register: Register = on => {
                   {shown.map((line, j) =>
                     renderLine(group, file, line, `${group.name}/${file.path}:${i}:${j}`, width),
                   )}
-                  {hunk.lines.length > MAX_HUNK_LINES && (
-                    <Text dimColor>  … {hunk.lines.length - MAX_HUNK_LINES} more lines</Text>
+                  {more > 0 && (
+                    <Text dimColor>  … {more} more lines</Text>
                   )}
                 </Box>
               )
@@ -814,6 +816,16 @@ export const register: Register = on => {
             {group.files.map(file => renderFile(group, file))}
           </Box>
         ))}
+      </Box>
+    )
+  }).catch(($, e, next) => {
+    // Say why rather than leave the pane blank.
+    const { Box, Text } = $.ui.resolve(e)
+
+    return (
+      <Box flexDirection="column" gap={1}>
+        <Text color="red">The review pane could not draw ({next.error.kind}).</Text>
+        {next.error.message ? <Text dimColor>{next.error.message}</Text> : null}
       </Box>
     )
   })

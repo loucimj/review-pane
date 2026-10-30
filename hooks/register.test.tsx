@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
-import { clip, formatComments, isHeavy, parseDiff, tokenize } from './git'
+import { clip, formatComments, isHeavy, parseDiff, slim, tokenize } from './git'
 
 const DIFF = [
   'diff --git a/src/a.ts b/src/a.ts',
@@ -247,4 +247,16 @@ test('a changed submodule of a touched repository gets its own chip', async ($, 
   expect(await ui.find({ key: 'repo:api' })).toBeDefined()
   expect(await ui.find({ key: 'repo:shared' })).toBeDefined()
   await ui.unmount()
+})
+
+test('the stored snapshot keeps only what is drawn', () => {
+  const [map] = parseDiff(MAP_DIFF)
+  const long = Array.from({ length: 500 }, (_, i) => `+line ${i}`)
+  const [big] = parseDiff(['diff --git a/b.ts b/b.ts', '--- a/b.ts', '+++ b/b.ts', '@@ -0,0 +1,500 @@', ...long, ''].join('\n'))
+  const small = map && slim(map)
+  expect(small?.isLarge).toBe(true)
+  expect(small?.hunks[0]?.lines[0]?.text.length).toBeLessThan(500)
+  const trimmed = big && slim(big)
+  expect(trimmed?.hunks[0]?.lines.length).toBe(300)
+  expect(trimmed?.hunks[0]?.more).toBe(200)
 })

@@ -9,7 +9,8 @@ export type DiffLine = {
   newNo?: number
 }
 
-export type Hunk = { header: string; lines: DiffLine[] }
+// `more`: lines past those kept, dropped before the snapshot is stored.
+export type Hunk = { header: string; lines: DiffLine[]; more?: number }
 
 export type FileDiff = {
   path: string
@@ -19,6 +20,8 @@ export type FileDiff = {
   removed: number
   isBinary: boolean
   hunks: Hunk[]
+  // Generated or too big to read: drawn folded until opened.
+  isLarge?: boolean
 }
 
 // A comment is anchored to one side of the diff: `new` for added and context

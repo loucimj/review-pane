@@ -119,6 +119,23 @@ export function isHeavy(file: FileDiff): boolean {
   return false
 }
 
+export const MAX_HUNK_LINES = 300
+export const MAX_DRAWN_CHARS = 400
+
+// What the snapshot keeps of a file: no more lines than are drawn, each no
+// longer than is drawn, so the stored state stays small however big the diff.
+export function slim(file: FileDiff): FileDiff {
+  return {
+    ...file,
+    isLarge: isHeavy(file),
+    hunks: file.hunks.map(h => ({
+      header: h.header,
+      lines: h.lines.slice(0, MAX_HUNK_LINES).map(l => ({ ...l, text: clip(l.text, MAX_DRAWN_CHARS) })),
+      more: (h.more ?? 0) + Math.max(0, h.lines.length - MAX_HUNK_LINES),
+    })),
+  }
+}
+
 export function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}… (${text.length - max} more chars)` : text
 }
