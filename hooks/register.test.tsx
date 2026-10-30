@@ -34,22 +34,24 @@ function ok(stdout: string) {
   return { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
 }
 
-// Two repositories under /work: `api` (the diff above) and `web` (clean).
-function fakeGit(argv: readonly string[], cwd = '/work') {
+// Three repositories under /work: `api` (the diff above), `web` and `ops`;
+// those in `dirty` carry the diff, the rest are clean.
+function fakeGit(argv: readonly string[], cwd = '/work', dirty: readonly string[] = ['api']) {
   const cmd = argv.join(' ')
-  if (cmd.startsWith('find ')) return ok('/work/api/.git\n/work/web/.git\n')
+  const isDirty = dirty.some(name => cwd === `/work/${name}`)
+  if (cmd.startsWith('find ')) return ok('/work/api/.git\n/work/web/.git\n/work/ops/.git\n')
   if (cmd === 'git rev-parse --show-toplevel') {
     return cwd === '/work' ? { ...ok(''), exitCode: 128 } : ok(`${cwd}\n`)
   }
-  if (cmd === 'git status --porcelain') return ok(cwd === '/work/api' ? ' M src/a.ts\n' : '')
-  if (cmd.startsWith('git diff --no-color')) return ok(cwd === '/work/api' ? DIFF : '')
+  if (cmd === 'git status --porcelain') return ok(isDirty ? ' M src/a.ts\n' : '')
+  if (cmd.startsWith('git diff --no-color')) return ok(isDirty ? DIFF : '')
 
   return ok('')
 }
 
-function fakeHost(on: Parameters<TestBody>[1]) {
+function fakeHost(on: Parameters<TestBody>[1], dirty?: readonly string[]) {
   on('session.cwd', () => ({ value: '/work' }))
-  on('process.run', (_, e) => ({ value: fakeGit(e.argv, e.init?.cwd) }))
+  on('process.run', (_, e) => ({ value: fakeGit(e.argv, e.init?.cwd, dirty) }))
 }
 
 test('parseDiff numbers lines on both sides', () => {
@@ -75,7 +77,39 @@ test('formatComments names a file relative to the session when it can', () => {
   expect(formatComments([{ ...comment, repo: '/elsewhere' }], '/work')).toContain('/elsewhere/src/a.ts:2')
 })
 
-test('both repositories are found, and a comment rides along with the next prompt', async ($, on) => {
+test('changed repositories get a chip, clean ones none', async ($, on) => {
+  fakeHost(on, ['api', 'web'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'refresh' })
+  expect(await ui.find({ key: 'repo:api' })).toBeDefined()
+  expect(await ui.find({ key: 'repo:web' })).toBeDefined()
+  expect(await ui.find({ key: 'repo:ops' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('once the session touches a repository, the others wait behind a toggle', async ($, on) => {
+  fakeHost(on, ['api', 'web'])
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'refresh' })
+  await $.command.run({
+    command: 'review-pane',
+    args: 'add web',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: false, columns: 80 },
+  })
+
+  expect(await ui.find({ key: 'repo:web' })).toBeDefined()
+  expect(await ui.find({ key: 'repo:api' })).toBeUndefined()
+  expect((await ui.find({ key: 'repo:others' }))?.text).toContain('+1 other changed')
+
+  await ui.press({ key: 'repo:others' })
+  expect(await ui.find({ key: 'repo:api' })).toBeDefined()
+  expect(await ui.find({ key: 'repo:ops' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('the one changed repository is selected and a comment rides along with the next prompt', async ($, on) => {
   fakeHost(on)
   let context: readonly string[] | undefined
   on('prompt.submit', (_, e) => {
@@ -86,8 +120,9 @@ test('both repositories are found, and a comment rides along with the next promp
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'refresh' })
-  expect(await ui.find({ key: 'repo:api' })).toBeDefined()
-  expect(await ui.find({ key: 'repo:web' })).toBeDefined()
+  // A lone repository needs no picker.
+  expect(await ui.find({ key: 'repo:api' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /No changes/ })).toBeUndefined()
 
   await ui.press({ key: 'add:api/src/a.ts:0:2' })
   await ui.input({ key: 'draft', text: 'Why 3?' })

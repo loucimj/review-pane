@@ -41,14 +41,22 @@ export type Draft = Omit<Comment, 'id' | 'text' | 'isSent'>
 // scope, one per changed repository for Last turn.
 export type RepoGroup = { root: string; name: string; files: FileDiff[] }
 
-export type RepoSummary = { root: string; name: string; changed: number }
+// `isTouched`: this session changed it (an Edit or Write there, a turn that
+// changed its tree or HEAD, or added by hand).
+export type RepoSummary = { root: string; name: string; changed: number; isTouched: boolean }
 
+// `repos` are the chips drawn; `others` the changed repositories the session
+// did not touch, drawn only on request. `root` and `scope` name what `groups`
+// were loaded for, so a drawing can tell a stale snapshot from an empty one.
 export type Snapshot = {
   groups: RepoGroup[]
   repos: RepoSummary[]
+  others: RepoSummary[]
   error: string | null
   branches: string[]
   commits: { sha: string; subject: string }[]
+  root: string | null
+  scope: Scope | null
 }
 
 declare module 'claude-code' {
@@ -63,6 +71,9 @@ declare module 'claude-code' {
       draft: Draft | null
       turnBase: Record<string, string>
       turnFiles: Record<string, string[]>
+      turnPrint: Record<string, string>
+      touched: string[]
+      showAll: boolean
       snapshot: Shaped<Snapshot>
       comments: Shaped<Comment[]>
     }

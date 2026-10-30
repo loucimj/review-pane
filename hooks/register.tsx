@@ -47,7 +47,16 @@ const TOKEN_COLOR: Record<TokenKind, string | undefined> = {
   type: 'permission',
 }
 
-const EMPTY: Snapshot = { groups: [], repos: [], error: null, branches: [], commits: [] }
+const EMPTY: Snapshot = {
+  groups: [],
+  repos: [],
+  others: [],
+  error: null,
+  branches: [],
+  commits: [],
+  root: null,
+  scope: null,
+}
 
 const scope = atom({ plugin: 'review-pane', key: 'scope' } as const, 'unstaged')
 const repos = atom({ plugin: 'review-pane', key: 'repos' } as const, [])
@@ -59,10 +68,15 @@ const collapsed = atom({ plugin: 'review-pane', key: 'collapsed' } as const, [])
 const draft = atom({ plugin: 'review-pane', key: 'draft' } as const, null)
 const turnBase = atom({ plugin: 'review-pane', key: 'turnBase' } as const, {})
 const turnFiles = atom({ plugin: 'review-pane', key: 'turnFiles' } as const, {})
+// HEAD and `git status` per repository as the turn started, to tell which
+// ones the turn changed, Bash included.
+const turnPrint = atom({ plugin: 'review-pane', key: 'turnPrint' } as const, {})
+const touched = atom({ plugin: 'review-pane', key: 'touched' } as const, [])
+const showAll = atom({ plugin: 'review-pane', key: 'showAll' } as const, false)
 // Change a tag when its value's fields change: it declines what an earlier
 // version stored, which outlives a reload.
 const snapshot = atom({ plugin: 'review-pane', key: 'snapshot' } as const, EMPTY, {
-  shape: 'snapshot-2',
+  shape: 'snapshot-3',
 })
 const comments = atom({ plugin: 'review-pane', key: 'comments' } as const, [], {
   shape: 'comments-2',
@@ -88,8 +102,40 @@ async function addRepo($: $, root: string): Promise<void> {
   await update($, repos, list => (list.includes(root) ? list : [...list, root]))
 }
 
+async function markTouched($: $, root: string): Promise<void> {
+  await update($, touched, list => (list.includes(root) ? list : [...list, root]))
+}
+
+async function fingerprint($: $, root: string): Promise<string | null> {
+  const head = (await git($, ['git', 'rev-parse', 'HEAD'], root))?.trim() ?? ''
+  const status = await git($, ['git', 'status', '--porcelain'], root)
+
+  return status === null ? null : `${head}\n${status}`
+}
+
+// A repository the turn changed: its HEAD or status moved, or a file already
+// changed was changed again (the tree differs from the turn's snapshot).
+async function detectTouched($: $): Promise<void> {
+  const known = await read($, touched)
+  const prints = await read($, turnPrint)
+  const bases = await read($, turnBase)
+  const roots = Object.keys(prints).filter(r => !known.includes(r))
+  const changed = await Promise.all(
+    roots.map(async root => {
+      if ((await fingerprint($, root)) !== prints[root]) return true
+      const sha = bases[root]
+      if (!sha) return false
+      const ran = await $.process.run(['git', 'diff', '--quiet', sha], { cwd: root })
+
+      return ran.exitCode === 1
+    }),
+  )
+  for (const [i, root] of roots.entries()) if (changed[i]) await markTouched($, root)
+}
+
 // The session's own repository, those one or two folders below it, and any
-// already known (touched by an edit or added by hand).
+// already known (touched by an edit or added by hand). Which of them get a
+// chip is `load`'s choice.
 async function discover($: $): Promise<void> {
   const cwd = await $.session.cwd()
   const found: string[] = []
@@ -100,15 +146,12 @@ async function discover($: $): Promise<void> {
     'find', cwd, '-mindepth', '2', '-maxdepth', '3', '-name', '.git',
     '-not', '-path', '*/node_modules/*',
   ])
-  for (const dotGit of ran.stdout.split('\n').filter(Boolean)) {
-    const root = await toplevel($, dirOf(dotGit))
-    if (root && !found.includes(root)) found.push(root)
-  }
+  const roots = await Promise.all(
+    ran.stdout.split('\n').filter(Boolean).map(dotGit => toplevel($, dirOf(dotGit))),
+  )
+  for (const root of roots) if (root && !found.includes(root)) found.push(root)
 
   for (const root of found) await addRepo($, root)
-  const list = await read($, repos)
-  const chosen = await read($, repo)
-  if (!chosen || !list.includes(chosen)) await update($, repo, () => list[0] ?? null)
 }
 
 async function defaultBase($: $, root: string, branches: string[]): Promise<string | null> {
@@ -165,23 +208,59 @@ async function loadGroup($: $, root: string, current: Scope, branches: string[])
 async function load($: $): Promise<Snapshot> {
   const list = await read($, repos)
   if (list.length === 0) {
-    return { ...EMPTY, error: 'No git repository here. Add one with /review-pane add <path>.' }
+    return {
+      ...EMPTY,
+      scope: await read($, scope),
+      error: 'No git repository here. Add one with /review-pane add <path>.',
+    }
   }
 
-  const summaries: RepoSummary[] = []
-  for (const root of list) {
-    const status = (await git($, ['git', 'status', '--porcelain'], root)) ?? ''
-    summaries.push({ root, name: repoName(root), changed: status.split('\n').filter(Boolean).length })
+  const marked = await read($, touched)
+  const summaries: RepoSummary[] = await Promise.all(
+    list.map(async root => {
+      const status = (await git($, ['git', 'status', '--porcelain'], root)) ?? ''
+
+      return {
+        root,
+        name: repoName(root),
+        changed: status.split('\n').filter(Boolean).length,
+        isTouched: marked.includes(root),
+      }
+    }),
+  )
+
+  // Chips go to the repositories this session touched; before it has touched
+  // any, to those with changes. Other changed ones wait behind a toggle, and
+  // clean ones are never drawn. With nothing to show, the session's own
+  // repository stands alone, for its branch and commits.
+  const anyTouched = summaries.some(r => r.isTouched)
+  const isFocus = (r: RepoSummary) => (anyTouched ? r.isTouched : r.changed > 0)
+  const focus = summaries.filter(isFocus)
+  const others = summaries.filter(r => !isFocus(r) && r.changed > 0)
+  let shown = (await read($, showAll)) ? [...focus, ...others] : focus
+  if (shown.length === 0) {
+    const own = await toplevel($, await $.session.cwd())
+    shown = summaries.filter(r => r.root === own).slice(0, 1)
   }
 
-  const root = (await read($, repo)) ?? list[0] ?? ''
+  const selected = await read($, repo)
+  const root = shown.some(r => r.root === selected) ? (selected ?? '') : (shown[0]?.root ?? '')
+  if (root !== (selected ?? '')) await update($, repo, () => root || null)
+  const current = await read($, scope)
+  if (!root && current !== 'turn') {
+    return { ...EMPTY, others, scope: current, error: null }
+  }
+
   const branches = ((await git($, ['git', 'branch', '--format=%(refname:short)'], root)) ?? '')
     .split('\n')
     .filter(Boolean)
   const log = (await git($, ['git', 'log', '-n', '20', '--format=%h%x09%s'], root)) ?? ''
   const snap: Snapshot = {
     ...EMPTY,
-    repos: summaries,
+    repos: shown,
+    others,
+    root: root || null,
+    scope: current,
     branches,
     commits: log
       .split('\n')
@@ -193,7 +272,6 @@ async function load($: $): Promise<Snapshot> {
       }),
   }
 
-  const current = await read($, scope)
   try {
     if (current !== 'turn') return { ...snap, groups: [await loadGroup($, root, current, branches)] }
 
@@ -270,6 +348,7 @@ export const register: Register = on => {
       const root = arg ? await toplevel($, path) : null
       if (!root) return { text: `Not a git repository: ${arg || '(no path given)'}` }
       await addRepo($, root)
+      await markTouched($, root)
       await update($, repo, () => root)
       await refresh($)
       await $.ui.open({ id: PANE, title: TITLE })
@@ -288,13 +367,19 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       const bases: Record<string, string> = {}
-      for (const root of await read($, repos)) {
-        const stash = (await git($, ['git', 'stash', 'create'], root))?.trim()
-        const head = (await git($, ['git', 'rev-parse', 'HEAD'], root))?.trim()
-        const sha = stash || head
-        if (sha) bases[root] = sha
-      }
+      const prints: Record<string, string> = {}
+      await Promise.all(
+        (await read($, repos)).map(async root => {
+          const stash = (await git($, ['git', 'stash', 'create'], root))?.trim()
+          const head = (await git($, ['git', 'rev-parse', 'HEAD'], root))?.trim()
+          const sha = stash || head
+          if (sha) bases[root] = sha
+          const print = await fingerprint($, root)
+          if (print !== null) prints[root] = print
+        }),
+      )
       await update($, turnBase, () => bases)
+      await update($, turnPrint, () => prints)
       await update($, turnFiles, () => ({}))
     }
 
@@ -308,6 +393,7 @@ export const register: Register = on => {
       if (root && e.file_path.startsWith(root + '/')) {
         const rel = e.file_path.slice(root.length + 1)
         await addRepo($, root)
+        await markTouched($, root)
         await update($, turnFiles, all => {
           const list = all[root] ?? []
 
@@ -321,7 +407,7 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('turn.complete', async ($, e, next) => {
-    void refresh($)
+    void detectTouched($).then(() => refresh($))
 
     return next(e)
   })
@@ -429,12 +515,23 @@ export const register: Register = on => {
         mode: 'replace',
       })
 
-    const files = snap.groups.flatMap(g => g.files)
+    const isAll = await read($, showAll)
+    const toggleOthers = async () => {
+      await update($, showAll, v => !v)
+      await refresh($)
+    }
+
+    // The selection or scope moved on since the last load: its groups belong
+    // to another repository, so they are not drawn as this one's.
+    const isLoading =
+      snap.scope !== current || (current !== 'turn' && (snap.root ?? null) !== (selected ?? null))
+    const groups = isLoading ? [] : snap.groups
+    const files = groups.flatMap(g => g.files)
     const totals = files.reduce(
       (t, f) => ({ added: t.added + f.added, removed: t.removed + f.removed }),
       { added: 0, removed: 0 },
     )
-    const isMulti = snap.repos.length > 1
+    const isMulti = snap.repos.length > 1 || snap.others.length > 0
     const title = current === 'turn' && isMulti
       ? 'All repos'
       : repoName(selected ?? snap.repos[0]?.root ?? 'Review')
@@ -594,6 +691,14 @@ export const register: Register = on => {
                   {r.changed ? <Text dimColor> {r.changed}</Text> : ''}
                 </Button>
               ))}
+              {snap.others.length > 0 && (
+                <Button
+                  key="repo:others"
+                  label={isAll ? 'Only this session’s' : `+${snap.others.length} other changed`}
+                  dimColor
+                  onPress={toggleOthers}
+                />
+              )}
             </Box>
           )}
           <Box gap={1} flexWrap="wrap">
@@ -666,8 +771,13 @@ export const register: Register = on => {
           </Box>
         )}
 
-        {!snap.error && files.length === 0 && <Text dimColor>No changes in this scope.</Text>}
-        {snap.groups.map(group => (
+        {isLoading && <Text dimColor>Loading…</Text>}
+        {!isLoading && !snap.error && files.length === 0 && (
+          <Text dimColor>
+            {snap.root || current === 'turn' ? 'No changes in this scope.' : 'No changes in any repository.'}
+          </Text>
+        )}
+        {groups.map(group => (
           <Box flexDirection="column" gap={1}>
             {(current === 'turn' && isMulti) && <Text bold color="claude">{group.name}</Text>}
             {group.files.map(file => renderFile(group, file))}
