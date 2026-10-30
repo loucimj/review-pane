@@ -74,6 +74,7 @@ declare module 'claude-code' {
       turnPrint: Record<string, string>
       touched: string[]
       showAll: boolean
+      isRefreshing: boolean
       snapshot: Shaped<Snapshot>
       comments: Shaped<Comment[]>
     }

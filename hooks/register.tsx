@@ -73,6 +73,8 @@ const turnFiles = atom({ plugin: 'review-pane', key: 'turnFiles' } as const, {})
 const turnPrint = atom({ plugin: 'review-pane', key: 'turnPrint' } as const, {})
 const touched = atom({ plugin: 'review-pane', key: 'touched' } as const, [])
 const showAll = atom({ plugin: 'review-pane', key: 'showAll' } as const, false)
+// True while a refresh reloads the diff, so the header's button can say so.
+const isRefreshing = atom({ plugin: 'review-pane', key: 'isRefreshing' } as const, false)
 // Change a tag when its value's fields change: it declines what an earlier
 // version stored, which outlives a reload.
 const snapshot = atom({ plugin: 'review-pane', key: 'snapshot' } as const, EMPTY, {
@@ -304,6 +306,7 @@ function refresh($: $): Promise<void> {
   chain = chain
     .then(async () => {
       isQueued = false
+      await update($, isRefreshing, () => true)
       const next = await load($)
       await update($, snapshot, () => next)
     })
@@ -311,6 +314,7 @@ function refresh($: $): Promise<void> {
       isQueued = false
       await update($, snapshot, s => ({ ...s, error: String(err) }))
     })
+    .finally(() => update($, isRefreshing, () => false))
 
   return chain
 }
@@ -516,6 +520,7 @@ export const register: Register = on => {
       })
 
     const isAll = await read($, showAll)
+    const isBusy = await read($, isRefreshing)
     const toggleOthers = async () => {
       await update($, showAll, v => !v)
       await refresh($)
@@ -671,13 +676,21 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column" gap={1}>
-          <Text bold>
-            {title}{' '}
-            <Text dimColor>
-              {files.length} file{files.length === 1 ? '' : 's'}{' '}
+          <Box justifyContent="space-between" alignItems="center" gap={1}>
+            <Text bold>
+              {title}{' '}
+              <Text dimColor>
+                {files.length} file{files.length === 1 ? '' : 's'}{' '}
+              </Text>
+              <Text color="green">+{totals.added}</Text> <Text color="red">-{totals.removed}</Text>
             </Text>
-            <Text color="green">+{totals.added}</Text> <Text color="red">-{totals.removed}</Text>
-          </Text>
+            <Button
+              key="refresh"
+              label={isBusy ? '↻ Refreshing…' : '↻ Refresh'}
+              dimColor={isBusy}
+              onPress={() => discover($).then(() => refresh($))}
+            />
+          </Box>
           {isMulti && (
             <Box gap={1} flexWrap="wrap">
               {snap.repos.map(r => (
@@ -711,7 +724,6 @@ export const register: Register = on => {
                 onPress={() => setScope(s.id)}
               />
             ))}
-            <Button key="refresh" label="Refresh" dimColor onPress={() => discover($).then(() => refresh($))} />
           </Box>
           {current === 'branch' && Select && selected && snap.branches.length > 0 && (
             <Select
