@@ -101,6 +101,28 @@ export function parseDiff(text: string): FileDiff[] {
   return files
 }
 
+// Generated files (source maps, build info, lockfiles, minified bundles) and
+// diffs too big to read start folded: drawn whole they stall the pane.
+const GENERATED = /(\.map|\.tsbuildinfo|\.min\.(js|css)|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml))$/
+const MAX_FILE_LINES = 2000
+const MAX_LINE_CHARS = 2000
+
+export function isHeavy(file: FileDiff): boolean {
+  if (GENERATED.test(file.path)) return true
+  let count = 0
+  for (const hunk of file.hunks) {
+    count += hunk.lines.length
+    if (count > MAX_FILE_LINES) return true
+    if (hunk.lines.some(l => l.text.length > MAX_LINE_CHARS)) return true
+  }
+
+  return false
+}
+
+export function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}… (${text.length - max} more chars)` : text
+}
+
 export function lineAnchor(line: DiffLine): { side: 'old' | 'new'; line: number } {
   return line.kind === '-'
     ? { side: 'old', line: line.oldNo ?? 0 }

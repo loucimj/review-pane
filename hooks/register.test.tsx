@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
-import { formatComments, parseDiff, tokenize } from './git'
+import { clip, formatComments, isHeavy, parseDiff, tokenize } from './git'
 
 const DIFF = [
   'diff --git a/src/a.ts b/src/a.ts',
@@ -13,6 +13,18 @@ const DIFF = [
   '-const b = 2',
   '+const b = 3',
   ' export { a, b }',
+  '',
+].join('\n')
+
+// A source map's one long line changed: generated, so it starts folded.
+const MAP_DIFF = [
+  'diff --git a/bin/a.js.map b/bin/a.js.map',
+  'index 333..444 100644',
+  '--- a/bin/a.js.map',
+  '+++ b/bin/a.js.map',
+  '@@ -1 +1 @@',
+  `-{"mappings":"${'A'.repeat(5000)}"}`,
+  `+{"mappings":"${'B'.repeat(5000)}"}`,
   '',
 ].join('\n')
 
@@ -44,7 +56,8 @@ function fakeGit(argv: readonly string[], cwd = '/work', dirty: readonly string[
     return cwd === '/work' ? { ...ok(''), exitCode: 128 } : ok(`${cwd}\n`)
   }
   if (cmd === 'git status --porcelain') return ok(isDirty ? ' M src/a.ts\n' : '')
-  if (cmd.startsWith('git diff --no-color')) return ok(isDirty ? DIFF : '')
+  if (cmd.startsWith('git diff --no-color')) return ok(isDirty ? (cwd === '/work/api' ? DIFF + MAP_DIFF : DIFF) : '')
+  if (cmd.startsWith('git submodule foreach')) return ok(cwd === '/work/api' ? '/work/api/lib/shared\n' : '')
 
   return ok('')
 }
@@ -200,4 +213,38 @@ test('the band toggles the pane and steps aside when nothing changed', async ($,
     expect(open.has('review-pane')).toBe(false)
     await band.unmount()
   }
+})
+
+test('generated and oversized files start folded; long lines are clipped', async ($, on) => {
+  const [map] = parseDiff(MAP_DIFF)
+  const [plain] = parseDiff(DIFF)
+  expect(map && isHeavy(map)).toBe(true)
+  expect(plain && isHeavy(plain)).toBe(false)
+  expect(clip('abcdef', 3)).toBe('abc… (3 more chars)')
+
+  fakeHost(on)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'refresh' })
+  expect(await ui.find({ key: 'add:api/src/a.ts:0:2' })).toBeDefined()
+  expect(await ui.find({ key: 'add:api/bin/a.js.map:0:1' })).toBeUndefined()
+  expect((await ui.find({ key: 'f:api/bin/a.js.map' }))?.text).toContain('folded')
+  await ui.press({ key: 'f:api/bin/a.js.map' })
+  expect(await ui.find({ key: 'add:api/bin/a.js.map:0:1' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a changed submodule of a touched repository gets its own chip', async ($, on) => {
+  fakeHost(on, ['api', 'api/lib/shared'])
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await $.command.run({
+    command: 'review-pane',
+    args: 'add api',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: false, columns: 80 },
+  })
+  await ui.press({ key: 'refresh' })
+  expect(await ui.find({ key: 'repo:api' })).toBeDefined()
+  expect(await ui.find({ key: 'repo:shared' })).toBeDefined()
+  await ui.unmount()
 })

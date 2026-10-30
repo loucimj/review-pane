@@ -17,6 +17,8 @@ import {
   formatComments,
   isOnLine,
   lineAnchor,
+  clip,
+  isHeavy,
   parseDiff,
   repoName,
   tokenize,
@@ -27,6 +29,7 @@ const PANE = 'review-pane'
 const TITLE = 'Review'
 const MAX_HUNK_LINES = 300
 const MAX_UNTRACKED = 30
+const MAX_DRAWN_CHARS = 400
 
 const SCOPES: { id: Scope; label: string }[] = [
   { id: 'unstaged', label: 'Unstaged' },
@@ -153,6 +156,14 @@ async function discover($: $): Promise<void> {
   )
   for (const root of roots) if (root && !found.includes(root)) found.push(root)
 
+  // Submodules sit at any depth, deeper than the search above reaches.
+  const subs = await Promise.all(
+    found.map(root => git($, ['git', 'submodule', 'foreach', '--quiet', '--recursive', 'pwd'], root)),
+  )
+  for (const out of subs) {
+    for (const root of (out ?? '').split('\n').filter(Boolean)) if (!found.includes(root)) found.push(root)
+  }
+
   for (const root of found) await addRepo($, root)
 }
 
@@ -221,12 +232,16 @@ async function load($: $): Promise<Snapshot> {
   const summaries: RepoSummary[] = await Promise.all(
     list.map(async root => {
       const status = (await git($, ['git', 'status', '--porcelain'], root)) ?? ''
+      const changed = status.split('\n').filter(Boolean).length
+      // A changed submodule of a touched repository counts as touched: its
+      // parent's status names it, but its own files are only diffed here.
+      const isInside = marked.some(t => root.startsWith(t + '/'))
 
       return {
         root,
         name: repoName(root),
-        changed: status.split('\n').filter(Boolean).length,
-        isTouched: marked.includes(root),
+        changed,
+        isTouched: marked.includes(root) || (isInside && changed > 0),
       }
     }),
   )
@@ -585,7 +600,7 @@ export const register: Register = on => {
               </Text>
             </Box>
             <Text mono>
-              {line.text === '' ? ' ' : tokenize(line.text, file.path).map(t => {
+              {line.text === '' ? ' ' : tokenize(clip(line.text, MAX_DRAWN_CHARS), file.path).map(t => {
                 const color = TOKEN_COLOR[t.kind]
 
                 return color ? (
@@ -626,7 +641,10 @@ export const register: Register = on => {
 
     const renderFile = (group: RepoGroup, file: FileDiff) => {
       const foldKey = `${group.root}:${file.path}`
-      const isOpen = !folded.has(foldKey)
+      // `collapsed` holds the files flipped from their default: heavy ones
+      // start folded, the rest open.
+      const isLarge = isHeavy(file)
+      const isOpen = isLarge ? folded.has(foldKey) : !folded.has(foldKey)
       const toggle = () =>
         update($, collapsed, list =>
           list.includes(foldKey) ? list.filter(p => p !== foldKey) : [...list, foldKey],
@@ -646,6 +664,7 @@ export const register: Register = on => {
             <Text color="green">+{file.added}</Text>{' '}
             <Text color="red">-{file.removed}</Text>
             <Text dimColor>{tag}</Text>
+            {isLarge && !isOpen ? <Text dimColor> · large or generated, folded</Text> : ''}
           </Button>
           {isOpen && file.isBinary && <Text dimColor>  Binary file</Text>}
           {isOpen &&
