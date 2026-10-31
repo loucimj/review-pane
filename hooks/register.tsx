@@ -322,12 +322,17 @@ function refresh($: $): Promise<void> {
   chain = chain
     .then(async () => {
       isQueued = false
+      const t0 = Date.now()
+      trace($, 'refresh start')
       await update($, isRefreshing, () => true)
       const next = await load($)
+      trace($, `refresh loaded ${Date.now() - t0}ms, ${JSON.stringify(next).length} chars, error ${next.error}`)
       await update($, snapshot, () => next)
+      trace($, `refresh stored ${Date.now() - t0}ms`)
     })
     .catch(async err => {
       isQueued = false
+      trace($, `refresh failed: ${String(err)}`)
       await update($, snapshot, s => ({ ...s, error: String(err) }))
     })
     .finally(() => update($, isRefreshing, () => false))
@@ -346,20 +351,39 @@ function newId(): string {
   return Math.random().toString(36).slice(2, 10)
 }
 
+// A temporary trace to diagnose a pane that never draws: the last lines of
+// what the module did, rewritten to a file the developer can read.
+const TRACE_PATH = '/tmp/review-pane-trace.log'
+const traceLines: string[] = []
+let traceWrite: Promise<void> = Promise.resolve()
+const loadedAt = Date.now()
+
+function trace($: $, line: string): void {
+  traceLines.push(`${new Date().toISOString()} +${Date.now() - loadedAt}ms ${line}`)
+  if (traceLines.length > 300) traceLines.splice(0, traceLines.length - 300)
+  const text = traceLines.join('\n') + '\n'
+  traceWrite = traceWrite.then(() => $.fs.write(TRACE_PATH, text)).catch(() => {})
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
+    trace($, `session.start ${e.surface} cwd ${await $.session.cwd()}`)
     await $.command.register({
       name: 'review-pane',
       description: 'Open the code review pane: scoped diffs with inline comments',
       argumentHint: '[add <repo path>]',
     })
-    void discover($).then(() => refresh($))
+    void discover($).then(async () => {
+      trace($, `discovered ${(await read($, repos)).length} repos`)
+      await refresh($)
+    })
     if (e.surface === 'desktop') void $.ui.open({ id: PANE, title: TITLE })
 
     return next(e)
   })
 
   on('command.run', { command: 'review-pane' }, async ($, e) => {
+    trace($, `command.run ${e.args}`)
     const [verb, ...rest] = e.args.trim().split(/\s+/)
     if (verb === 'add') {
       const cwd = await $.session.cwd()
@@ -386,6 +410,7 @@ export const register: Register = on => {
   // touching it, before the model runs, so the scope shows only this turn.
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
+      const t0 = Date.now()
       const bases: Record<string, string> = {}
       const prints: Record<string, string> = {}
       await Promise.all(
@@ -401,6 +426,7 @@ export const register: Register = on => {
       await update($, turnBase, () => bases)
       await update($, turnPrint, () => prints)
       await update($, turnFiles, () => ({}))
+      trace($, `turn.start snapshot ${Object.keys(prints).length} repos ${Date.now() - t0}ms`)
     }
 
     return next(e)
@@ -486,6 +512,8 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const t0 = Date.now()
+    trace($, `render start ${e.surface}`)
     const table = $.ui.resolve(e)
     const { Box, Text, Button } = table
     // Mobile has no text field or select: it shows diffs and comments only.
@@ -694,6 +722,7 @@ export const register: Register = on => {
       )
     }
 
+    trace($, `render built ${Date.now() - t0}ms`)
     return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column" gap={1}>
@@ -819,6 +848,7 @@ export const register: Register = on => {
       </Box>
     )
   }).catch(($, e, next) => {
+    trace($, `render failed ${next.error.kind}: ${next.error.message ?? ''}`)
     // Say why rather than leave the pane blank.
     const { Box, Text } = $.ui.resolve(e)
 
