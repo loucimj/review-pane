@@ -359,6 +359,13 @@ const traceLines: string[] = []
 let traceWrite: Promise<void> = Promise.resolve()
 const loadedAt = Date.now()
 
+// The last tree the pane returned, with the props it drew for, beside the trace.
+function dumpTree($: $, data: unknown): void {
+  traceWrite = traceWrite
+    .then(() => $.fs.write(tracePath.replace(/\.log$/, '.tree.json'), JSON.stringify(data, null, 1)))
+    .catch(() => {})
+}
+
 function trace($: $, line: string): void {
   traceLines.push(`${new Date().toISOString()} +${Date.now() - loadedAt}ms ${line}`)
   if (traceLines.length > 300) traceLines.splice(0, traceLines.length - 300)
@@ -731,8 +738,7 @@ export const register: Register = on => {
       )
     }
 
-    trace($, `render built ${Date.now() - t0}ms`)
-    return (
+    const tree = (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column" gap={1}>
           <Box justifyContent="space-between" alignItems="center" gap={1}>
@@ -856,6 +862,10 @@ export const register: Register = on => {
         ))}
       </Box>
     )
+    trace($, `render built ${Date.now() - t0}ms`)
+    dumpTree($, { surface: e.surface, props: e.props, tree })
+
+    return tree
   }).catch(($, e, next) => {
     trace($, `render failed ${next.error.kind}: ${next.error.message ?? ''}`)
     // Say why rather than leave the pane blank.
