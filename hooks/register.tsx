@@ -18,7 +18,10 @@ import {
   isOnLine,
   lineAnchor,
   clip,
+  IGNORED_PATHSPEC,
   isHeavy,
+  isIgnored,
+  keptStatus,
   MAX_DRAWN_CHARS,
   MAX_HUNK_LINES,
   slim,
@@ -136,7 +139,7 @@ async function fingerprint($: $, root: string): Promise<string | null> {
   const head = (await git($, ['git', 'rev-parse', 'HEAD'], root))?.trim() ?? ''
   const status = await git($, ['git', 'status', '--porcelain'], root)
 
-  return status === null ? null : `${head}\n${status}`
+  return status === null ? null : `${head}\n${keptStatus(status).join('\n')}`
 }
 
 // A repository the turn changed: its HEAD or status moved, or a file already
@@ -151,7 +154,7 @@ async function detectTouched($: $): Promise<void> {
       if ((await fingerprint($, root)) !== prints[root]) return true
       const sha = bases[root]
       if (!sha) return false
-      const ran = await $.process.run(['git', 'diff', '--quiet', sha], { cwd: root })
+      const ran = await $.process.run(['git', 'diff', '--quiet', sha, '--', '.', IGNORED_PATHSPEC], { cwd: root })
 
       return ran.exitCode === 1
     }),
@@ -225,13 +228,13 @@ async function loadGroup($: $, root: string, current: Scope, branches: string[])
 
   const ran = await $.process.run(argv, { cwd: root })
   if (ran.exitCode !== 0) throw new Error(ran.stderr.trim() || `git exited ${ran.exitCode}`)
-  const files = parseDiff(ran.stdout)
+  const files = parseDiff(ran.stdout).filter(f => !isIgnored(f.path))
 
   // Untracked files are part of the working tree, Codex-style: in Unstaged all
   // of them, in Last turn only those the turn wrote.
   if (current === 'unstaged' || current === 'turn') {
     const others = await git($, ['git', 'ls-files', '--others', '--exclude-standard'], root)
-    let paths = (others ?? '').split('\n').filter(Boolean)
+    let paths = (others ?? '').split('\n').filter(p => p && !isIgnored(p))
     if (current === 'turn') paths = paths.filter(p => wrote.includes(p))
     files.push(...(await untracked($, root, paths)))
   }
@@ -253,7 +256,7 @@ async function load($: $): Promise<Snapshot> {
   const summaries: RepoSummary[] = await Promise.all(
     list.map(async root => {
       const status = (await git($, ['git', 'status', '--porcelain'], root)) ?? ''
-      const changed = status.split('\n').filter(Boolean).length
+      const changed = keptStatus(status).length
       // A changed submodule of a touched repository counts as touched: its
       // parent's status names it, but its own files are only diffed here.
       const isInside = marked.some(t => root.startsWith(t + '/'))

@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
-import { clip, formatComments, isHeavy, parseDiff, slim, tokenize } from './git'
+import { clip, formatComments, isHeavy, keptStatus, parseDiff, slim, tokenize } from './git'
 
 const DIFF = [
   'diff --git a/src/a.ts b/src/a.ts',
@@ -18,10 +18,10 @@ const DIFF = [
 
 // A source map's one long line changed: generated, so it starts folded.
 const MAP_DIFF = [
-  'diff --git a/bin/a.js.map b/bin/a.js.map',
+  'diff --git a/dist/a.js.map b/dist/a.js.map',
   'index 333..444 100644',
-  '--- a/bin/a.js.map',
-  '+++ b/bin/a.js.map',
+  '--- a/dist/a.js.map',
+  '+++ b/dist/a.js.map',
   '@@ -1 +1 @@',
   `-{"mappings":"${'A'.repeat(5000)}"}`,
   `+{"mappings":"${'B'.repeat(5000)}"}`,
@@ -271,10 +271,10 @@ test('generated and oversized files start folded; long lines are clipped', async
   await touch($, 'api')
   await ui.press({ key: 'refresh' })
   expect(await ui.find({ key: 'add:api/src/a.ts:0:2' })).toBeDefined()
-  expect(await ui.find({ key: 'add:api/bin/a.js.map:0:1' })).toBeUndefined()
-  expect((await ui.find({ key: 'f:api/bin/a.js.map' }))?.text).toContain('folded')
-  await ui.press({ key: 'f:api/bin/a.js.map' })
-  expect(await ui.find({ key: 'add:api/bin/a.js.map:0:1' })).toBeDefined()
+  expect(await ui.find({ key: 'add:api/dist/a.js.map:0:1' })).toBeUndefined()
+  expect((await ui.find({ key: 'f:api/dist/a.js.map' }))?.text).toContain('folded')
+  await ui.press({ key: 'f:api/dist/a.js.map' })
+  expect(await ui.find({ key: 'add:api/dist/a.js.map:0:1' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -329,5 +329,35 @@ test('a long diff stays well under the desktop element limit', async ($, on) => 
   const all = await ui.findAll({})
   expect(all.length).toBeLessThan(800)
   expect((await ui.find({ type: 'Text', text: /fold other files/ }))?.text).toContain('350 more lines')
+  await ui.unmount()
+})
+
+test('build output under bin/ is left out of diffs and counts', async ($, on) => {
+  expect(keptStatus(' M src/a.ts\n M server/bin/a.js\n?? bin/x.js\nR  old.ts -> lib/bin/new.js\n')).toEqual([' M src/a.ts'])
+
+  const BIN_DIFF = DIFF.replaceAll('src/a.ts', 'server/bin/a.js')
+  on('session.cwd', () => ({ value: '/work' }))
+  on('session.id', () => ({ value: 'session-1' }))
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('process.run', (_, e) => {
+    const cmd = e.argv.join(' ')
+    const cwd = e.init?.cwd ?? '/work'
+    if (cmd.startsWith('find ')) return { value: ok('/work/api/.git\n') }
+    if (cmd === 'git rev-parse --show-toplevel') return { value: cwd === '/work' ? { ...ok(''), exitCode: 128 } : ok(`${cwd}\n`) }
+    if (cmd === 'git status --porcelain') return { value: ok(' M src/a.ts\n M server/bin/a.js\n') }
+    if (cmd.startsWith('git diff --no-color')) return { value: ok(DIFF + BIN_DIFF) }
+    if (cmd === 'git ls-files --others --exclude-standard') return { value: ok('server/bin/b.js\n') }
+
+    return { value: ok('') }
+  })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await touch($, 'api')
+  await ui.press({ key: 'refresh' })
+  expect(await ui.find({ key: 'f:api/src/a.ts' })).toBeDefined()
+  expect(await ui.find({ key: 'f:api/server/bin/a.js' })).toBeUndefined()
+  expect(await ui.find({ key: 'f:api/server/bin/b.js' })).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: /file/ }))?.text).toContain('1 file')
   await ui.unmount()
 })

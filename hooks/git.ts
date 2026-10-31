@@ -119,6 +119,25 @@ export function isHeavy(file: FileDiff): boolean {
   return false
 }
 
+// Build output (`bin/` at any depth, as a `tsc -w` watcher writes it) is
+// left out of every diff, count and touch check.
+const IGNORED = /(^|\/)bin\//
+export const IGNORED_PATHSPEC = ':(exclude,glob)**/bin/**'
+
+export function isIgnored(path: string): boolean {
+  return IGNORED.test(path)
+}
+
+// `git status --porcelain` lines that are not build output; a rename names
+// its new path after ` -> `, and a path with spaces comes quoted.
+export function keptStatus(status: string): string[] {
+  return status.split('\n').filter(Boolean).filter(line => {
+    const path = line.slice(3).split(' -> ').pop() ?? ''
+
+    return !isIgnored(path.replace(/^"|"$/g, ''))
+  })
+}
+
 export const MAX_HUNK_LINES = 300
 export const MAX_DRAWN_CHARS = 400
 
