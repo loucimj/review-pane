@@ -29,6 +29,7 @@ import {
 } from './git'
 
 const PANE = 'review-pane'
+const MAX_PANE_LINES = 50
 const TITLE = 'Review'
 const MAX_UNTRACKED = 30
 
@@ -108,8 +109,27 @@ async function addRepo($: $, root: string): Promise<void> {
   await update($, repos, list => (list.includes(root) ? list : [...list, root]))
 }
 
+// `$.state` starts empty when the session's process restarts, so the
+// repositories each session touched are kept in the store as well, for the
+// last sessions only.
+const TOUCHED_KEY = 'touched-by-session'
+const MAX_REMEMBERED = 50
+type Remembered = Record<string, { roots: string[]; at: number }>
+
 async function markTouched($: $, root: string): Promise<void> {
   await update($, touched, list => (list.includes(root) ? list : [...list, root]))
+  const id = await $.session.id()
+  const all = ((await $.store.get(TOUCHED_KEY)) ?? {}) as Remembered
+  all[id] = { roots: await read($, touched), at: Date.now() }
+  const kept = Object.entries(all).sort((a, b) => b[1].at - a[1].at).slice(0, MAX_REMEMBERED)
+  await $.store.set(TOUCHED_KEY, Object.fromEntries(kept))
+}
+
+async function restoreTouched($: $): Promise<void> {
+  const all = ((await $.store.get(TOUCHED_KEY)) ?? {}) as Remembered
+  const mine = all[await $.session.id()]?.roots ?? []
+  for (const root of mine) await addRepo($, root)
+  await update($, touched, list => [...new Set([...list, ...mine])])
 }
 
 async function fingerprint($: $, root: string): Promise<string | null> {
@@ -247,12 +267,11 @@ async function load($: $): Promise<Snapshot> {
     }),
   )
 
-  // Chips go to the repositories this session touched; before it has touched
-  // any, to those with changes. Other changed ones wait behind a toggle, and
-  // clean ones are never drawn. With nothing to show, the session's own
-  // repository stands alone, for its branch and commits.
-  const anyTouched = summaries.some(r => r.isTouched)
-  const isFocus = (r: RepoSummary) => (anyTouched ? r.isTouched : r.changed > 0)
+  // Chips go to the repositories this session touched alone. Other changed
+  // ones wait behind a toggle, and clean ones are never drawn. Until the
+  // session has touched one, its own repository stands alone, for its
+  // changes, branch and commits.
+  const isFocus = (r: RepoSummary) => r.isTouched
   const focus = summaries.filter(isFocus)
   const others = summaries.filter(r => !isFocus(r) && r.changed > 0)
   let shown = (await read($, showAll)) ? [...focus, ...others] : focus
@@ -322,17 +341,12 @@ function refresh($: $): Promise<void> {
   chain = chain
     .then(async () => {
       isQueued = false
-      const t0 = Date.now()
-      trace($, 'refresh start')
       await update($, isRefreshing, () => true)
       const next = await load($)
-      trace($, `refresh loaded ${Date.now() - t0}ms, ${JSON.stringify(next).length} chars, error ${next.error}`)
       await update($, snapshot, () => next)
-      trace($, `refresh stored ${Date.now() - t0}ms`)
     })
     .catch(async err => {
       isQueued = false
-      trace($, `refresh failed: ${String(err)}`)
       await update($, snapshot, s => ({ ...s, error: String(err) }))
     })
     .finally(() => update($, isRefreshing, () => false))
@@ -351,55 +365,21 @@ function newId(): string {
   return Math.random().toString(36).slice(2, 10)
 }
 
-// A temporary trace to diagnose a pane that never draws: the last lines of
-// what the module did, rewritten to a file the developer can read.
-// One file per session folder, so sessions don't overwrite each other.
-let tracePath = ''
-const traceLines: string[] = []
-let traceWrite: Promise<void> = Promise.resolve()
-const loadedAt = Date.now()
-
-// The last tree the pane returned, with the props it drew for, beside the trace.
-function dumpTree($: $, data: unknown): void {
-  traceWrite = traceWrite
-    .then(() => $.fs.write(tracePath.replace(/\.log$/, '.tree.json'), JSON.stringify(data, null, 1)))
-    .catch(() => {})
-}
-
-function trace($: $, line: string): void {
-  traceLines.push(`${new Date().toISOString()} +${Date.now() - loadedAt}ms ${line}`)
-  if (traceLines.length > 300) traceLines.splice(0, traceLines.length - 300)
-  const text = traceLines.join('\n') + '\n'
-  traceWrite = traceWrite
-    .then(async () => {
-      if (!tracePath) {
-        const slug = (await $.session.cwd()).replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '')
-        tracePath = `/tmp/review-pane-trace-${slug}.log`
-      }
-      await $.fs.write(tracePath, text)
-    })
-    .catch(() => {})
-}
-
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    trace($, `session.start ${e.surface} cwd ${await $.session.cwd()}`)
+    await restoreTouched($)
     await $.command.register({
       name: 'review-pane',
       description: 'Open the code review pane: scoped diffs with inline comments',
       argumentHint: '[add <repo path>]',
     })
-    void discover($).then(async () => {
-      trace($, `discovered ${(await read($, repos)).length} repos`)
-      await refresh($)
-    })
+    void discover($).then(() => refresh($))
     if (e.surface === 'desktop') void $.ui.open({ id: PANE, title: TITLE })
 
     return next(e)
   })
 
   on('command.run', { command: 'review-pane' }, async ($, e) => {
-    trace($, `command.run ${e.args}`)
     const [verb, ...rest] = e.args.trim().split(/\s+/)
     if (verb === 'add') {
       const cwd = await $.session.cwd()
@@ -426,7 +406,6 @@ export const register: Register = on => {
   // touching it, before the model runs, so the scope shows only this turn.
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
-      const t0 = Date.now()
       const bases: Record<string, string> = {}
       const prints: Record<string, string> = {}
       await Promise.all(
@@ -442,7 +421,6 @@ export const register: Register = on => {
       await update($, turnBase, () => bases)
       await update($, turnPrint, () => prints)
       await update($, turnFiles, () => ({}))
-      trace($, `turn.start snapshot ${Object.keys(prints).length} repos ${Date.now() - t0}ms`)
     }
 
     return next(e)
@@ -528,8 +506,6 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const t0 = Date.now()
-    trace($, `render start ${e.surface}`)
     const table = $.ui.resolve(e)
     const { Box, Text, Button } = table
     // Mobile has no text field or select: it shows diffs and comments only.
@@ -684,6 +660,10 @@ export const register: Register = on => {
       )
     }
 
+    // The desktop drops a pane past about 1,000 elements without a word, and
+    // a diff line costs about a dozen; past this budget lines wait behind a
+    // note, and folding other files frees it.
+    let linesLeft = MAX_PANE_LINES
     const renderFile = (group: RepoGroup, file: FileDiff) => {
       const foldKey = `${group.root}:${file.path}`
       // `collapsed` holds the files flipped from their default: heavy ones
@@ -715,8 +695,10 @@ export const register: Register = on => {
           {isOpen &&
             !file.isBinary &&
             file.hunks.map((hunk, i) => {
-              const shown = hunk.lines.slice(0, MAX_HUNK_LINES)
+              const shown = hunk.lines.slice(0, Math.min(MAX_HUNK_LINES, linesLeft))
+              linesLeft -= shown.length
               const more = (hunk.more ?? 0) + hunk.lines.length - shown.length
+              const isCut = shown.length < Math.min(MAX_HUNK_LINES, hunk.lines.length)
 
               return (
                 <Box flexDirection="column">
@@ -729,7 +711,10 @@ export const register: Register = on => {
                     renderLine(group, file, line, `${group.name}/${file.path}:${i}:${j}`, width),
                   )}
                   {more > 0 && (
-                    <Text dimColor>  … {more} more lines</Text>
+                    <Text dimColor>
+                      {'  '}… {more} more line{more === 1 ? '' : 's'}
+                      {isCut ? ' (the pane shows ' + MAX_PANE_LINES + ' at a time: fold other files to see them)' : ''}
+                    </Text>
                   )}
                 </Box>
               )
@@ -738,7 +723,7 @@ export const register: Register = on => {
       )
     }
 
-    const tree = (
+    return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column" gap={1}>
           <Box justifyContent="space-between" alignItems="center" gap={1}>
@@ -851,7 +836,11 @@ export const register: Register = on => {
         {isLoading && <Text dimColor>Loading…</Text>}
         {!isLoading && !snap.error && files.length === 0 && (
           <Text dimColor>
-            {snap.root || current === 'turn' ? 'No changes in this scope.' : 'No changes in any repository.'}
+            {snap.root || current === 'turn'
+              ? 'No changes in this scope.'
+              : snap.others.length
+                ? 'This session has not changed a repository yet.'
+                : 'No changes in any repository.'}
           </Text>
         )}
         {groups.map(group => (
@@ -862,12 +851,7 @@ export const register: Register = on => {
         ))}
       </Box>
     )
-    trace($, `render built ${Date.now() - t0}ms`)
-    dumpTree($, { surface: e.surface, props: e.props, tree })
-
-    return tree
   }).catch(($, e, next) => {
-    trace($, `render failed ${next.error.kind}: ${next.error.message ?? ''}`)
     // Say why rather than leave the pane blank.
     const { Box, Text } = $.ui.resolve(e)
 

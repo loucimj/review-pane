@@ -1,6 +1,6 @@
 {
   "name": "review-pane",
-  "version": "0.3.6",
+  "version": "0.4.0",
   "description": "A code review pane beside the chat: scoped git diffs across repos with inline comments that ride along with your next message.",
   "license": "MIT",
   "types": "./types/index.d.ts"

@@ -62,9 +62,32 @@ function fakeGit(argv: readonly string[], cwd = '/work', dirty: readonly string[
   return ok('')
 }
 
-function fakeHost(on: Parameters<TestBody>[1], dirty?: readonly string[]) {
+function fakeHost(
+  on: Parameters<TestBody>[1],
+  dirty?: readonly string[],
+  store = new Map<string, unknown>(),
+  canOpen = true,
+) {
   on('session.cwd', () => ({ value: '/work' }))
+  on('session.id', () => ({ value: 'session-1' }))
+  if (canOpen) on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('store.get', (_, e) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e) => {
+    store.set(e.key, e.value)
+
+    return { value: undefined }
+  })
   on('process.run', (_, e) => ({ value: fakeGit(e.argv, e.init?.cwd, dirty) }))
+}
+
+// The session touches a repository, as an edit there would.
+async function touch($: Parameters<TestBody>[0], name: string) {
+  await $.command.run({
+    command: 'review-pane',
+    args: `add ${name}`,
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: false, columns: 80 },
+  })
 }
 
 test('parseDiff numbers lines on both sides', () => {
@@ -90,19 +113,35 @@ test('formatComments names a file relative to the session when it can', () => {
   expect(formatComments([{ ...comment, repo: '/elsewhere' }], '/work')).toContain('/elsewhere/src/a.ts:2')
 })
 
-test('changed repositories get a chip, clean ones none', async ($, on) => {
+test('only the repositories this session touched get a chip', async ($, on) => {
   fakeHost(on, ['api', 'web'])
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'refresh' })
-  expect(await ui.find({ key: 'repo:api' })).toBeDefined()
-  expect(await ui.find({ key: 'repo:web' })).toBeDefined()
-  expect(await ui.find({ key: 'repo:ops' })).toBeUndefined()
+  expect(await ui.find({ key: 'repo:api' })).toBeUndefined()
+  expect((await ui.find({ key: 'repo:others' }))?.text).toContain('+2 other changed')
+  expect(await ui.find({ type: 'Text', text: /has not changed a repository yet/ })).toBeDefined()
+
+  await touch($, 'api')
+  expect(await ui.find({ key: 'add:api/src/a.ts:0:2' })).toBeDefined()
+  expect((await ui.find({ key: 'repo:others' }))?.text).toContain('+1 other changed')
+  await ui.unmount()
+})
+
+test('what the session touched survives a restart', async ($, on) => {
+  const store = new Map<string, unknown>()
+  store.set('touched-by-session', { 'session-1': { roots: ['/work/web'], at: 1 } })
+  fakeHost(on, ['api', 'web'], store)
+  on('command.register', () => ({ deny: 'not in a test' }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await $.session.start({ cwd: '/work', surface: null, isInteractive: false })
+  await ui.press({ key: 'refresh' })
+  expect((await ui.find({ key: 'repo:others' }))?.text).toContain('+1 other changed')
   await ui.unmount()
 })
 
 test('once the session touches a repository, the others wait behind a toggle', async ($, on) => {
   fakeHost(on, ['api', 'web'])
-  on('ui.open', () => ({ value: { isPlaced: true } }))
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'refresh' })
   await $.command.run({
@@ -132,6 +171,7 @@ test('the one changed repository is selected and a comment rides along with the 
   })
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await touch($, 'api')
   await ui.press({ key: 'refresh' })
   // A lone repository needs no picker.
   expect(await ui.find({ key: 'repo:api' })).toBeUndefined()
@@ -152,6 +192,7 @@ test('the pane draws the diff on every surface; only those with input can commen
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
+    await touch($, 'api')
     await ui.press({ key: 'refresh' })
     expect(await ui.find({ type: 'Text', text: /const b = 3|^3$/ })).toBeDefined()
     expect(Boolean(await ui.find({ key: 'add:api/src/a.ts:0:2' }))).toBe(surface !== 'mobile')
@@ -162,6 +203,7 @@ test('the pane draws the diff on every surface; only those with input can commen
 test('a file folds and unfolds', async ($, on) => {
   fakeHost(on)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await touch($, 'api')
   await ui.press({ key: 'refresh' })
   expect(await ui.find({ key: 'add:api/src/a.ts:0:2' })).toBeDefined()
   await ui.press({ key: 'f:api/src/a.ts' })
@@ -171,7 +213,7 @@ test('a file folds and unfolds', async ($, on) => {
 })
 
 test('the band toggles the pane and steps aside when nothing changed', async ($, on) => {
-  fakeHost(on)
+  fakeHost(on, undefined, undefined, false)
   const open = new Set<string>()
   on('ui.open', (_, e) => {
     open.add(e.id)
@@ -188,8 +230,10 @@ test('the band toggles the pane and steps aside when nothing changed', async ($,
   }))
 
   const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await touch($, 'api')
   await pane.press({ key: 'refresh' })
   await pane.unmount()
+  open.clear()
 
   const BAND = {
     plugin: 'review-pane',
@@ -224,6 +268,7 @@ test('generated and oversized files start folded; long lines are clipped', async
 
   fakeHost(on)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await touch($, 'api')
   await ui.press({ key: 'refresh' })
   expect(await ui.find({ key: 'add:api/src/a.ts:0:2' })).toBeDefined()
   expect(await ui.find({ key: 'add:api/bin/a.js.map:0:1' })).toBeUndefined()
@@ -235,7 +280,6 @@ test('generated and oversized files start folded; long lines are clipped', async
 
 test('a changed submodule of a touched repository gets its own chip', async ($, on) => {
   fakeHost(on, ['api', 'api/lib/shared'])
-  on('ui.open', () => ({ value: { isPlaced: true } }))
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await $.command.run({
     command: 'review-pane',
@@ -259,4 +303,31 @@ test('the stored snapshot keeps only what is drawn', () => {
   const trimmed = big && slim(big)
   expect(trimmed?.hunks[0]?.lines.length).toBe(300)
   expect(trimmed?.hunks[0]?.more).toBe(200)
+})
+
+test('a long diff stays well under the desktop element limit', async ($, on) => {
+  const long = Array.from({ length: 400 }, (_, i) => `+const v${i} = call(${i}) // note`)
+  const BIG = ['diff --git a/src/a.ts b/src/a.ts', '--- a/src/a.ts', '+++ b/src/a.ts', '@@ -0,0 +1,400 @@', ...long, ''].join('\n')
+  on('session.cwd', () => ({ value: '/work' }))
+  on('session.id', () => ({ value: 'session-1' }))
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('process.run', (_, e) => {
+    const cmd = e.argv.join(' ')
+    const cwd = e.init?.cwd ?? '/work'
+    if (cmd.startsWith('find ')) return { value: ok('/work/api/.git\n') }
+    if (cmd === 'git rev-parse --show-toplevel') return { value: cwd === '/work' ? { ...ok(''), exitCode: 128 } : ok(`${cwd}\n`) }
+    if (cmd === 'git status --porcelain') return { value: ok(' M src/a.ts\n') }
+    if (cmd.startsWith('git diff --no-color')) return { value: ok(BIG) }
+
+    return { value: ok('') }
+  })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await touch($, 'api')
+  await ui.press({ key: 'refresh' })
+  const all = await ui.findAll({})
+  expect(all.length).toBeLessThan(800)
+  expect((await ui.find({ type: 'Text', text: /fold other files/ }))?.text).toContain('350 more lines')
+  await ui.unmount()
 })
