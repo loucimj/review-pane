@@ -353,7 +353,8 @@ function newId(): string {
 
 // A temporary trace to diagnose a pane that never draws: the last lines of
 // what the module did, rewritten to a file the developer can read.
-const TRACE_PATH = '/tmp/review-pane-trace.log'
+// One file per session folder, so sessions don't overwrite each other.
+let tracePath = ''
 const traceLines: string[] = []
 let traceWrite: Promise<void> = Promise.resolve()
 const loadedAt = Date.now()
@@ -362,7 +363,15 @@ function trace($: $, line: string): void {
   traceLines.push(`${new Date().toISOString()} +${Date.now() - loadedAt}ms ${line}`)
   if (traceLines.length > 300) traceLines.splice(0, traceLines.length - 300)
   const text = traceLines.join('\n') + '\n'
-  traceWrite = traceWrite.then(() => $.fs.write(TRACE_PATH, text)).catch(() => {})
+  traceWrite = traceWrite
+    .then(async () => {
+      if (!tracePath) {
+        const slug = (await $.session.cwd()).replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '')
+        tracePath = `/tmp/review-pane-trace-${slug}.log`
+      }
+      await $.fs.write(tracePath, text)
+    })
+    .catch(() => {})
 }
 
 export const register: Register = on => {
