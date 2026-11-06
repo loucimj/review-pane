@@ -328,7 +328,24 @@ test('a long diff stays well under the desktop element limit', async ($, on) => 
   await ui.press({ key: 'refresh' })
   const all = await ui.findAll({})
   expect(all.length).toBeLessThan(800)
-  expect((await ui.find({ type: 'Text', text: /fold other files/ }))?.text).toContain('350 more lines')
+  expect((await ui.find({ type: 'Text', text: /at a time/ }))?.text).toContain('350 more lines')
+  expect(await ui.find({ key: 'add:api/src/a.ts:0:0' })).toBeDefined()
+  expect(await ui.find({ key: 'add:api/src/a.ts:0:50' })).toBeUndefined()
+
+  // "Show next" moves the file's window down: the earlier lines stop being
+  // drawn, so the next 50 fit the same budget.
+  await ui.press({ key: 'next:/work/api:src/a.ts' })
+  expect((await ui.findAll({})).length).toBeLessThan(800)
+  expect(await ui.find({ key: 'add:api/src/a.ts:0:0' })).toBeUndefined()
+  expect(await ui.find({ key: 'add:api/src/a.ts:0:50' })).toBeDefined()
+  expect(await ui.find({ key: 'add:api/src/a.ts:0:99' })).toBeDefined()
+  expect(await ui.find({ key: 'add:api/src/a.ts:0:100' })).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: /lines above/ }))?.text).toContain('50 lines above')
+  expect((await ui.find({ type: 'Text', text: /at a time/ }))?.text).toContain('300 more lines')
+
+  await ui.press({ key: 'prev:/work/api:src/a.ts' })
+  expect(await ui.find({ key: 'add:api/src/a.ts:0:0' })).toBeDefined()
+  expect(await ui.find({ key: 'prev:/work/api:src/a.ts' })).toBeUndefined()
   await ui.unmount()
 })
 

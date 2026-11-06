@@ -71,6 +71,8 @@ declare module 'claude-code' {
       base: Record<string, string>
       commit: string | null
       collapsed: string[]
+      // Per `root:path`, how many diff lines the file is scrolled past.
+      windows: Record<string, number>
       draft: Draft | null
       turnBase: Record<string, string>
       turnFiles: Record<string, string[]>

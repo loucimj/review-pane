@@ -73,6 +73,9 @@ const base = atom({ plugin: 'review-pane', key: 'base' } as const, {})
 const commit = atom({ plugin: 'review-pane', key: 'commit' } as const, null)
 // Files start unfolded; this holds the `root:path` of the ones folded.
 const collapsed = atom({ plugin: 'review-pane', key: 'collapsed' } as const, [])
+// Per `root:path`, how many diff lines are scrolled past: a file longer than
+// the pane's budget is paged through with "show next" and "show previous".
+const windows = atom({ plugin: 'review-pane', key: 'windows' } as const, {})
 const draft = atom({ plugin: 'review-pane', key: 'draft' } as const, null)
 const turnBase = atom({ plugin: 'review-pane', key: 'turnBase' } as const, {})
 const turnFiles = atom({ plugin: 'review-pane', key: 'turnFiles' } as const, {})
@@ -524,6 +527,7 @@ export const register: Register = on => {
     const current = await read($, scope)
     const selected = await read($, repo)
     const folded = new Set(await read($, collapsed))
+    const windowsNow = await read($, windows)
     const draftNow = await read($, draft)
     const all = await read($, comments)
     const pending = all.filter(c => !c.isSent)
@@ -665,7 +669,8 @@ export const register: Register = on => {
 
     // The desktop drops a pane past about 1,000 elements without a word, and
     // a diff line costs about a dozen; past this budget lines wait behind a
-    // note, and folding other files frees it.
+    // "show next" button, which moves the file's window down so the earlier
+    // lines stop costing. Folding other files frees budget too.
     let linesLeft = MAX_PANE_LINES
     const renderFile = (group: RepoGroup, file: FileDiff) => {
       const foldKey = `${group.root}:${file.path}`
@@ -683,6 +688,14 @@ export const register: Register = on => {
         ...file.hunks.flatMap(h => h.lines.map(l => Math.max(l.oldNo ?? 0, l.newNo ?? 0))),
       )
       const width = String(maxNo).length
+      // The window's start, as a count of this file's lines across hunks,
+      // never past the file's end.
+      const total = file.hunks.reduce((n, h) => n + h.lines.length, 0)
+      const offset = Math.min(windowsNow[foldKey] ?? 0, Math.max(0, total - 1))
+      const scrollTo = (start: number) =>
+        update($, windows, map => ({ ...map, [foldKey]: Math.max(0, start) }))
+      let toSkip = offset
+      let shownSoFar = 0
 
       return (
         <Box flexDirection="column">
@@ -698,10 +711,19 @@ export const register: Register = on => {
           {isOpen &&
             !file.isBinary &&
             file.hunks.map((hunk, i) => {
-              const shown = hunk.lines.slice(0, Math.min(MAX_HUNK_LINES, linesLeft))
+              const skipped = Math.min(toSkip, hunk.lines.length)
+              toSkip -= skipped
+              const from = skipped
+              const to = from + Math.min(MAX_HUNK_LINES, linesLeft, hunk.lines.length - from)
+              const shown = hunk.lines.slice(from, to)
               linesLeft -= shown.length
-              const more = (hunk.more ?? 0) + hunk.lines.length - shown.length
-              const isCut = shown.length < Math.min(MAX_HUNK_LINES, hunk.lines.length)
+              const isFirstShown = shownSoFar === 0 && shown.length > 0
+              shownSoFar += shown.length
+              const more = (hunk.more ?? 0) + hunk.lines.length - to
+              const isCut = to < hunk.lines.length
+              const shownEnd = offset + shownSoFar
+              // A hunk the window scrolled past entirely costs nothing.
+              if (shown.length === 0 && skipped === hunk.lines.length && skipped > 0) return null
 
               return (
                 <Box flexDirection="column">
@@ -710,14 +732,42 @@ export const register: Register = on => {
                       {hunk.header}
                     </Text>
                   </Box>
+                  {isFirstShown && offset > 0 && (
+                    <Box gap={1} paddingLeft={2}>
+                      <Text dimColor>
+                        … {offset} line{offset === 1 ? '' : 's'} above
+                      </Text>
+                      <Button
+                        key={`prev:${foldKey}`}
+                        label="Show previous"
+                        dimColor
+                        onPress={() => scrollTo(offset - MAX_PANE_LINES)}
+                      />
+                      <Button key={`top:${foldKey}`} label="Top" dimColor onPress={() => scrollTo(0)} />
+                    </Box>
+                  )}
                   {shown.map((line, j) =>
-                    renderLine(group, file, line, `${group.name}/${file.path}:${i}:${j}`, width),
+                    renderLine(group, file, line, `${group.name}/${file.path}:${i}:${from + j}`, width),
                   )}
                   {more > 0 && (
-                    <Text dimColor>
-                      {'  '}… {more} more line{more === 1 ? '' : 's'}
-                      {isCut ? ' (the pane shows ' + MAX_PANE_LINES + ' at a time: fold other files to see them)' : ''}
-                    </Text>
+                    <Box gap={1} paddingLeft={2}>
+                      <Text dimColor>
+                        … {more} more line{more === 1 ? '' : 's'}
+                        {isCut && shownSoFar === 0
+                          ? ' (the pane draws ' + MAX_PANE_LINES + ' at a time: fold other files, or scroll them, to see them)'
+                          : isCut
+                            ? ' (the pane draws ' + MAX_PANE_LINES + ' at a time)'
+                            : ''}
+                      </Text>
+                      {isCut && shownSoFar > 0 && (
+                        <Button
+                          key={`next:${foldKey}`}
+                          label="Show next"
+                          dimColor
+                          onPress={() => scrollTo(shownEnd)}
+                        />
+                      )}
+                    </Box>
                   )}
                 </Box>
               )
